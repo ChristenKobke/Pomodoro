@@ -15,6 +15,7 @@ on:
         - debug
         - release
 
+
 jobs:
   build:
     runs-on: ubuntu-latest
