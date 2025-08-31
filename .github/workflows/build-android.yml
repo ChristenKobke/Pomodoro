@@ -1,584 +1,182 @@
-name: Build Android APK (Enterprise-Grade)
-
+name: Build Android APK (Simple & Robust)
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ main ]
   pull_request:
-    branches: [ main, develop ]
+    branches: [ main ]
   workflow_dispatch:
     inputs:
       build_type:
-        description: 'Build type'
-        required: true
+        description: 'Build type (debug/release)'
+        required: false
         default: 'debug'
         type: choice
         options:
         - debug
         - release
-      skip_tests:
-        description: 'Skip tests'
-        required: false
-        default: false
-        type: boolean
-
-env:
-  NODE_VERSION: 20
-  JAVA_VERSION: 21
-  GRADLE_OPTS: -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g"
 
 jobs:
-  # Pre-build validation job
-  validate:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    outputs:
-      should_build: ${{ steps.check.outputs.should_build }}
-      build_type: ${{ steps.determine_build_type.outputs.build_type }}
-    
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
-          
-      - name: Check if build is needed
-        id: check
-        run: |
-          # Skip build if only README or docs changed
-          if git diff --name-only HEAD~1 HEAD | grep -E '\.(md|txt|yml|yaml)$' && ! git diff --name-only HEAD~1 HEAD | grep -v -E '\.(md|txt|yml|yaml)$'; then
-            echo "Only documentation changed, skipping build"
-            echo "should_build=false" >> $GITHUB_OUTPUT
-          else
-            echo "Code changes detected, proceeding with build"
-            echo "should_build=true" >> $GITHUB_OUTPUT
-          fi
-          
-      - name: Determine build type
-        id: determine_build_type
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "build_type=${{ github.event.inputs.build_type }}" >> $GITHUB_OUTPUT
-          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            echo "build_type=release" >> $GITHUB_OUTPUT
-          else
-            echo "build_type=debug" >> $GITHUB_OUTPUT
-          fi
-
-  # Main build job
   build:
-    needs: validate
-    if: needs.validate.outputs.should_build == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - build_type: ${{ needs.validate.outputs.build_type }}
+    timeout-minutes: 30
     
     steps:
-      # 1. Environment Setup
+      # 1. Checkout the repository
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-          submodules: recursive
-          
-      - name: Free up disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          df -h
       
-      # 2. Node.js Setup with multiple fallbacks
+      # 2. Setup Node.js with caching
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version: 20
           cache: 'npm'
-          registry-url: 'https://registry.npmjs.org'
-          
-      - name: Verify Node.js installation
-        run: |
-          echo "Node version: $(node --version)"
-          echo "NPM version: $(npm --version)"
-          npm config get registry
       
-      # 3. Dependency Management with retry logic
-      - name: Clear npm cache
-        run: npm cache clean --force
-        
-      - name: Install dependencies with retry
+      # 3. Install project dependencies (with retry)
+      - name: Install dependencies
         uses: nick-fields/retry@v3
         with:
-          timeout_minutes: 10
+          timeout_minutes: 5
           max_attempts: 3
-          retry_on: error
-          command: |
-            npm ci --prefer-offline --no-audit --verbose
-            
-      - name: Verify dependencies
-        run: |
-          echo "Checking critical dependencies..."
-          npm list @capacitor/core @capacitor/cli @capacitor/android || true
-          echo "Node modules size: $(du -sh node_modules 2>/dev/null || echo 'N/A')"
+          command: npm ci --prefer-offline --no-audit
       
-      # 4. Testing with conditional execution
-      - name: Run linting
-        run: npm run lint --if-present
-        continue-on-error: true
-        
+      # 4. Run tests (if available)
       - name: Run tests
-        if: github.event.inputs.skip_tests != 'true'
-        run: |
-          if npm run test:unit --if-present; then
-            echo "Unit tests passed"
-          else
-            echo "Unit tests failed or not available"
-          fi
+        run: npm run test --if-present
         continue-on-error: true
       
-      # 5. Vue Build with verification
-      - name: Build Vue application
-        run: |
-          echo "Building Vue application..."
-          npm run build
-          echo "Vue build completed successfully!"
-          
+      # 5. Build the Vue app
+      - name: Build Vue app
+        run: npm run build
+      
+      # 6. Verify Vue build
       - name: Verify Vue build output
         run: |
-          echo "Verifying build output..."
           if [ ! -d "dist" ]; then
             echo "❌ Error: dist directory not found!"
-            echo "Available directories:"
             ls -la
             exit 1
           fi
-          
-          echo "✅ Build output verified!"
-          echo "Dist directory contents:"
-          ls -la dist/
-          echo "Dist size: $(du -sh dist/)"
-          
-          # Check for essential files
-          if [ ! -f "dist/index.html" ]; then
-            echo "⚠️  Warning: index.html not found in dist/"
-          fi
+          echo "✅ Vue build verified - dist size: $(du -sh dist/)"
       
-      # 6. Java Setup with verification
+      # 7. Setup Java 21 (fixed version)
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: ${{ env.JAVA_VERSION }}
+          java-version: 21
           cache: 'gradle'
-          
-      - name: Verify Java installation
-        run: |
-          echo "Java version: $(java -version)"
-          echo "JAVA_HOME: $JAVA_HOME"
-          
-      # 7. Android SDK Setup
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-        
-      - name: Accept Android SDK licenses
-        run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
       
-      # 8. Gradle Setup with permissions
-      - name: Setup Gradle wrapper
-        run: |
-          if [ ! -f "./android/gradlew" ]; then
-            echo "❌ Error: gradlew not found in android directory!"
-            echo "Available files in android/:"
-            ls -la android/
-            exit 1
-          fi
-          
-          chmod +x ./android/gradlew
-          echo "✅ Gradle wrapper permissions set"
-          
-      - name: Verify Gradle installation
-        working-directory: android
-        run: |
-          ./gradlew --version
-          echo "Gradle verification completed"
+      # 8. Make gradlew executable
+      - name: Make gradlew executable
+        run: chmod +x ./android/gradlew
       
-      # 9. Capacitor Sync with comprehensive verification
-      - name: Verify Capacitor configuration
-        run: |
-          echo "Checking Capacitor configuration..."
-          if [ ! -f "capacitor.config.ts" ] && [ ! -f "capacitor.config.js" ]; then
-            echo "❌ Error: Capacitor config file not found!"
-            exit 1
-          fi
-          
-          echo "✅ Capacitor config found"
-          cat capacitor.config.* 2>/dev/null || echo "Config file exists but couldn't display contents"
-          
+      # 9. Sync Capacitor Android
       - name: Sync Capacitor Android
         run: |
-          echo "Starting Capacitor sync..."
-          npx cap sync android --verbose
-          echo "✅ Capacitor sync completed successfully"
-          
-      - name: Verify Capacitor sync
+          npx cap sync android
+          echo "✅ Capacitor sync completed"
+      
+      # 10. Verify Android setup
+      - name: Verify Android project
         run: |
-          echo "Verifying Capacitor sync results..."
-          
-          # Check if android platform was properly synced
           if [ ! -d "android/app/src/main/assets/public" ]; then
-            echo "❌ Error: Web assets not copied to Android project!"
-            echo "Android app structure:"
-            find android/app/src/main -type d 2>/dev/null || echo "Android src structure not found"
+            echo "❌ Web assets not synced to Android!"
             exit 1
           fi
-          
-          echo "✅ Web assets successfully synced to Android"
-          echo "Assets size: $(du -sh android/app/src/main/assets/public/)"
+          echo "✅ Android project ready"
       
-      # 10. Android Build with GUARANTEED APK creation
-      - name: Clean previous builds
-        working-directory: android
+      # 11. Build Android APK
+      - name: Build Android APK
         run: |
-          echo "Cleaning previous builds..."
-          ./gradlew clean --no-daemon
-          rm -rf app/build/outputs/apk/
+          # Determine build type
+          BUILD_TYPE="${{ github.event.inputs.build_type || 'debug' }}"
           
-      - name: Build Android APK (GUARANTEED)
-        working-directory: android
-        run: |
-          echo "🔨 Starting Android APK build..."
-          echo "Build type: ${{ needs.validate.outputs.build_type }}"
+          if [ "$BUILD_TYPE" = "release" ]; then
+            echo "🔨 Building RELEASE APK..."
+            ./gradlew assembleRelease --no-daemon --stacktrace
+            APK_PATH="app/build/outputs/apk/release/app-release-unsigned.apk"
+          else
+            echo "🔨 Building DEBUG APK..."
+            ./gradlew assembleDebug --no-daemon --stacktrace
+            APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
+          fi
           
-          # Set executable permissions again (just in case)
-          chmod +x ./gradlew
-          
-          # Always build debug first, then release if needed
-          echo "Building DEBUG APK (always)..."
-          ./gradlew assembleDebug --no-daemon --stacktrace --info --refresh-dependencies
-          
-          # Verify debug APK was created
-          if [ ! -f "app/build/outputs/apk/debug/app-debug.apk" ]; then
-            echo "❌ DEBUG APK FAILED TO BUILD!"
-            echo "Checking what was actually built:"
-            find app/build -name "*.apk" -type f || echo "No APKs found"
-            find app/build/outputs -type f || echo "No outputs found"
+          # Verify APK was created
+          if [ ! -f "$APK_PATH" ]; then
+            echo "❌ APK not found at expected path: $APK_PATH"
+            echo "Searching for any APK files..."
+            find app/build/outputs -name "*.apk" -type f || echo "No APK files found"
             exit 1
-          else
-            echo "✅ DEBUG APK successfully created!"
-            ls -la app/build/outputs/apk/debug/
           fi
           
-          # Build release APK if requested
-          if [[ "${{ needs.validate.outputs.build_type }}" == "release" ]]; then
-            echo "Building RELEASE APK..."
-            ./gradlew assembleRelease --no-daemon --stacktrace --info --refresh-dependencies
-            
-            if [ ! -f "app/build/outputs/apk/release/app-release-unsigned.apk" ] && [ ! -f "app/build/outputs/apk/release/app-release.apk" ]; then
-              echo "⚠️ RELEASE APK build failed, but DEBUG APK exists"
-              echo "Available release files:"
-              find app/build/outputs/apk/release -type f || echo "No release APK found"
-            else
-              echo "✅ RELEASE APK successfully created!"
-              ls -la app/build/outputs/apk/release/
-            fi
-          fi
+          echo "✅ APK built successfully: $APK_PATH"
+          echo "APK size: $(du -h "$APK_PATH" | cut -f1)"
           
-          echo "✅ APK build process completed!"
-          
-      # 10.5. FORCE APK creation if missing (fallback)  
-      - name: Force APK creation (fallback)
-        if: always()
+          # Export for next step
+          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
+          echo "BUILD_TYPE=$BUILD_TYPE" >> $GITHUB_ENV
         working-directory: android
-        run: |
-          echo "🔧 Checking for APK files and creating if missing..."
-          
-          # Check if any APK exists
-          APK_COUNT=$(find app/build/outputs -name "*.apk" -type f | wc -l)
-          echo "Found $APK_COUNT APK files"
-          
-          if [ "$APK_COUNT" -eq 0 ]; then
-            echo "🚨 NO APK FOUND! Attempting emergency build..."
-            
-            # Try alternative build commands
-            echo "Trying assembleDebug with different flags..."
-            ./gradlew assembleDebug --no-daemon --no-build-cache --rerun-tasks || true
-            
-            # Check if this worked
-            if [ -f "app/build/outputs/apk/debug/app-debug.apk" ]; then
-              echo "✅ Emergency build succeeded!"
-            else
-              echo "Trying basic gradle build..."
-              ./gradlew build --no-daemon || true
-              
-              # Last resort: check for any APK anywhere
-              echo "Searching entire android directory for APK files..."
-              find . -name "*.apk" -type f || echo "Absolutely no APK files found"
-            fi
-          else
-            echo "✅ APK files found, no emergency build needed"
-            find app/build/outputs -name "*.apk" -type f
-          fi
       
-      # 11. GUARANTEED APK Verification and Information
-      - name: Find and verify APK (BULLETPROOF)
-        run: |
-          echo "🔍 BULLETPROOF APK verification..."
-          
-          # Search for ALL APK files
-          echo "Searching for ALL APK files in android directory..."
-          ALL_APKS=$(find android -name "*.apk" -type f)
-          
-          if [ -z "$ALL_APKS" ]; then
-            echo "🚨 CRITICAL ERROR: NO APK FILES FOUND ANYWHERE!"
-            echo "Full android/app/build directory structure:"
-            find android/app/build -type f 2>/dev/null || echo "Build directory doesn't exist"
-            exit 1
-          fi
-          
-          echo "📱 Found APK files:"
-          echo "$ALL_APKS"
-          
-          # Prioritize APK selection
-          PRIMARY_APK=""
-          BACKUP_APK=""
-          
-          # Look for the primary APK based on build type
-          if [[ "${{ needs.validate.outputs.build_type }}" == "release" ]]; then
-            # Look for release APK first
-            PRIMARY_APK=$(echo "$ALL_APKS" | grep "release" | head -n 1)
-            BACKUP_APK=$(echo "$ALL_APKS" | grep "debug" | head -n 1)
-          else
-            # Look for debug APK first
-            PRIMARY_APK=$(echo "$ALL_APKS" | grep "debug" | head -n 1)
-            BACKUP_APK=$(echo "$ALL_APKS" | grep "release" | head -n 1)
-          fi
-          
-          # Choose the best APK
-          CHOSEN_APK=""
-          if [ -n "$PRIMARY_APK" ] && [ -f "$PRIMARY_APK" ]; then
-            CHOSEN_APK="$PRIMARY_APK"
-            echo "✅ Using primary APK: $CHOSEN_APK"
-          elif [ -n "$BACKUP_APK" ] && [ -f "$BACKUP_APK" ]; then
-            CHOSEN_APK="$BACKUP_APK"
-            echo "⚠️ Primary not found, using backup APK: $CHOSEN_APK"
-          else
-            # Just use the first APK found
-            CHOSEN_APK=$(echo "$ALL_APKS" | head -n 1)
-            echo "🔄 Using first available APK: $CHOSEN_APK"
-          fi
-          
-          # Final verification
-          if [ ! -f "$CHOSEN_APK" ]; then
-            echo "🚨 FINAL ERROR: Chosen APK doesn't exist: $CHOSEN_APK"
-            exit 1
-          fi
-          
-          # Get APK info
-          APK_SIZE=$(du -h "$CHOSEN_APK" | cut -f1)
-          APK_DATE=$(stat -c %y "$CHOSEN_APK")
-          
-          echo "✅ FINAL APK SELECTED: $CHOSEN_APK"
-          echo "📦 APK size: $APK_SIZE"
-          echo "🕒 Created: $APK_DATE"
-          
-          # Determine APK type from path
-          if [[ "$CHOSEN_APK" == *"release"* ]]; then
-            APK_TYPE="release"
-          else
-            APK_TYPE="debug"
-          fi
-          
-          # Store for next steps - use absolute path to be safe
-          ABSOLUTE_APK_PATH=$(realpath "$CHOSEN_APK")
-          echo "APK_PATH=$ABSOLUTE_APK_PATH" >> $GITHUB_ENV
-          echo "APK_TYPE=$APK_TYPE" >> $GITHUB_ENV
-          echo "APK_SIZE=$APK_SIZE" >> $GITHUB_ENV
-          
-          echo "🎉 APK VERIFICATION COMPLETED SUCCESSFULLY!"
-      
-      # 12. GUARANTEED APK Upload
-      - name: Upload APK Artifact (BULLETPROOF)
+      # 12. Upload APK artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
-        if: always() # ALWAYS try to upload, even if previous steps had issues
+        if: success()
         with:
-          name: notes-app-${{ env.APK_TYPE }}-${{ github.run_number }}-${{ github.sha }}
-          path: ${{ env.APK_PATH }}
+          name: notes-app-${{ env.BUILD_TYPE }}-${{ github.run_number }}
+          path: android/${{ env.APK_PATH }}
           retention-days: 30
-          if-no-files-found: warn # Don't fail entire workflow if no APK (but warn)
-          
-      # 12.5. Backup APK upload (upload ALL APKs found)
-      - name: Upload ALL APKs (Backup)
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: all-apks-backup-${{ github.run_number }}
-          path: android/**/*.apk
-          retention-days: 7
-          if-no-files-found: warn
-          
-      # 13. Create detailed build summary
-      - name: Generate build summary
-        if: always()
-        run: |
-          echo "## 📱 Android Build Summary" >> $GITHUB_STEP_SUMMARY
-          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Build Type | ${{ env.APK_TYPE }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Node.js | ${{ env.NODE_VERSION }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Java | ${{ env.JAVA_VERSION }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Trigger | ${{ github.event_name }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Branch | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Commit | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY
-          
-          if [ -f "${{ env.APK_PATH }}" ]; then
-            APK_SIZE=$(du -h "${{ env.APK_PATH }}" | cut -f1)
-            echo "| APK Size | $APK_SIZE |" >> $GITHUB_STEP_SUMMARY
-            echo "| Status | ✅ Success |" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "### 📥 Download APK" >> $GITHUB_STEP_SUMMARY
-            echo "The APK is available in the [build artifacts](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})." >> $GITHUB_STEP_SUMMARY
-          else
-            echo "| Status | ❌ Failed |" >> $GITHUB_STEP_SUMMARY
-          fi
       
-      # 14. Notify on commit (for push events)
-      - name: Add commit comment with APK info
-        if: success() && github.event_name == 'push' && env.APK_PATH != ''
+      # 13. Create build summary
+      - name: Build summary
+        if: success()
+        run: |
+          echo "## 📱 Android Build Completed!" >> $GITHUB_STEP_SUMMARY
+          echo "- **Build Type**: ${{ env.BUILD_TYPE }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **APK Path**: ${{ env.APK_PATH }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Artifact Name**: notes-app-${{ env.BUILD_TYPE }}-${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Download**: [Build Artifacts](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_STEP_SUMMARY
+      
+      # 14. Comment on commit (push events only)
+      - name: Add commit comment
+        if: success() && github.event_name == 'push'
         uses: actions/github-script@v7
         with:
           script: |
-            const fs = require('fs');
-            const path = require('path');
-            
-            // Get APK size
-            let apkSize = 'Unknown';
-            try {
-              const stats = fs.statSync(process.env.APK_PATH);
-              apkSize = (stats.size / 1024 / 1024).toFixed(2) + ' MB';
-            } catch (error) {
-              console.log('Could not get APK size:', error.message);
-            }
-            
-            const buildType = process.env.APK_TYPE || 'debug';
-            const artifactName = `notes-app-${buildType}-${{ github.run_number }}-${{ github.sha }}`;
-            
-            const body = `## 📱 Android APK Built Successfully!
-            
-            **Build Details:**
-            - 🔨 Build Type: \`${buildType}\`
-            - 📦 APK Size: \`${apkSize}\`
-            - 🏷️ Artifact Name: \`${artifactName}\`
-            - ⏱️ Build Time: ~${{ job.conclusion == 'success' && 'Successful' || 'Unknown' }}
-            
-            **📥 Download APK:**
-            [Download from Actions Artifacts](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
-            
-            *Built from commit: ${{ github.sha }}*`;
-            
             github.rest.repos.createCommitComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               commit_sha: context.sha,
-              body: body
+              body: `## 📱 Android APK Built Successfully!
+              
+              **Build Details:**
+              - Build Type: \`${{ env.BUILD_TYPE }}\`
+              - Artifact: \`notes-app-${{ env.BUILD_TYPE }}-${{ github.run_number }}\`
+              
+              **📥 Download APK:**
+              [Download from Actions](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+              
+              *Built from: ${{ github.sha }}*`
             });
-            
-      # 15. Security scan (optional but recommended)
-      - name: Run basic security checks
-        if: success()
-        run: |
-          echo "🔒 Running basic security checks..."
-          
-          # Check for hardcoded secrets (basic check)
-          if grep -r -i "password\|secret\|key\|token" android/app/src/main/res/ --include="*.xml" | grep -v "example\|placeholder\|demo"; then
-            echo "⚠️  Warning: Potential hardcoded secrets found in resources"
-          else
-            echo "✅ No obvious hardcoded secrets in resources"
-          fi
-          
-          # Check APK permissions
-          if command -v aapt &> /dev/null && [ -f "${{ env.APK_PATH }}" ]; then
-            echo "📋 APK Permissions:"
-            aapt dump permissions "${{ env.APK_PATH }}" || echo "Could not extract permissions"
-          fi
-
-  # Separate job for creating GitHub releases
-  release:
-    needs: [validate, build]
-    if: success() && startsWith(github.ref, 'refs/tags/v') && needs.validate.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    
-    steps:
-      - name: Download APK artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: notes-app-${{ needs.validate.outputs.build_type }}-${{ github.run_number }}-${{ github.sha }}
-          path: ./artifacts
-          
-      - name: Create GitHub Release
+      
+      # 15. Create GitHub release (for version tags)
+      - name: Create Release
+        if: success() && startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            ./artifacts/app-*.apk
+          files: android/${{ env.APK_PATH }}
           name: Release ${{ github.ref_name }}
           body: |
-            ## 📱 Notes App Release ${{ github.ref_name }}
+            ## 📱 Notes App ${{ github.ref_name }}
             
-            ### What's New
-            - Auto-generated from tag ${{ github.ref_name }}
-            - Built with workflow run #${{ github.run_number }}
+            ### Download
+            - **Android APK**: Download the APK file below
             
-            ### 📥 Download
-            - **Android APK**: Download the `.apk` file below
-            
-            ### 🔧 Technical Details
-            - Build Type: ${{ needs.validate.outputs.build_type }}
-            - Node.js: ${{ env.NODE_VERSION }}
-            - Java: ${{ env.JAVA_VERSION }}
-            - Commit: ${{ github.sha }}
-            
-            ### 📝 Installation
-            1. Download the APK file
-            2. Enable "Install from unknown sources" on your Android device
-            3. Install the APK
-            
-            > **Note**: This is a ${{ needs.validate.outputs.build_type }} build
-          draft: false
-          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
-          generate_release_notes: true
+            ### Build Info
+            - Build Type: ${{ env.BUILD_TYPE }}
+            - Java: 21
+            - Node.js: 20
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # Cleanup job for failed builds
-  cleanup:
-    needs: [validate, build]
-    if: always() && needs.build.result == 'failure'
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Build failure notification
-        uses: actions/github-script@v7
-        with:
-          script: |
-            if (context.eventName === 'push') {
-              github.rest.repos.createCommitComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                commit_sha: context.sha,
-                body: `## ❌ Android Build Failed
-                
-                The Android APK build failed for this commit. 
-                
-                **Debug Information:**
-                - 🔗 [View failed workflow run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
-                - 📋 Check the logs for detailed error information
-                - 🔧 Common issues: Java version mismatch, missing dependencies, Capacitor sync problems
-                
-                *Please check the workflow logs and fix any issues before pushing again.*`
-              });
-            }
-            
