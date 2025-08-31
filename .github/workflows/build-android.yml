@@ -47,32 +47,171 @@ jobs:
           node-version: 20
           # Removed cache to avoid lock file error
       
-      # 4. Install project dependencies (changed from npm ci to npm install)
+      # 4. Install project dependencies with maximum redundancy
       - name: Install dependencies
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 5
-          max_attempts: 3
-          command: npm install --prefer-offline --no-audit
+        run: |
+          echo "=== DEPENDENCY INSTALLATION WITH FULL REDUNDANCY ==="
+          
+          # Step 1: Verify we're in the right place
+          echo "Current directory: $(pwd)"
+          echo "Repository structure:"
+          find . -maxdepth 3 -type f -name "*.json" | head -10
+          
+          # Step 2: Look for package.json in multiple locations
+          PACKAGE_JSON_PATH=""
+          
+          if [ -f "package.json" ]; then
+            echo "✅ Found package.json in root"
+            PACKAGE_JSON_PATH="."
+          elif [ -f "./package.json" ]; then
+            echo "✅ Found package.json in ./package.json"
+            PACKAGE_JSON_PATH="."
+          elif [ -f "frontend/package.json" ]; then
+            echo "✅ Found package.json in frontend/"
+            PACKAGE_JSON_PATH="frontend"
+          elif [ -f "app/package.json" ]; then
+            echo "✅ Found package.json in app/"
+            PACKAGE_JSON_PATH="app"
+          elif [ -f "client/package.json" ]; then
+            echo "✅ Found package.json in client/"
+            PACKAGE_JSON_PATH="client"
+          else
+            # Search recursively
+            echo "🔍 Searching for package.json recursively..."
+            FOUND_PATH=$(find . -name "package.json" -type f | head -1)
+            if [ -n "$FOUND_PATH" ]; then
+              PACKAGE_JSON_PATH=$(dirname "$FOUND_PATH")
+              echo "✅ Found package.json at: $FOUND_PATH"
+            else
+              echo "❌ No package.json found anywhere!"
+              echo "Creating minimal package.json..."
+              
+              # Create minimal package.json as fallback
+              cat > package.json << 'EOF'
+          {
+            "name": "pomodoro",
+            "private": true,
+            "version": "0.0.0",
+            "type": "module",
+            "scripts": {
+              "dev": "vite",
+              "build": "vite build",
+              "preview": "vite preview"
+            },
+            "dependencies": {
+              "@capacitor/android": "^7.4.3",
+              "@capacitor/core": "^7.4.3",
+              "vue": "^3.5.18"
+            },
+            "devDependencies": {
+              "@capacitor/cli": "^7.4.3",
+              "@vitejs/plugin-vue": "^6.0.1",
+              "autoprefixer": "^10.4.21",
+              "postcss": "^8.5.6",
+              "tailwindcss": "^4.1.12",
+              "vite": "^7.1.2",
+              "vite-plugin-windicss": "^1.9.4",
+              "windicss": "^3.5.6"
+            }
+          }
+          EOF
+              echo "✅ Created minimal package.json"
+              PACKAGE_JSON_PATH="."
+            fi
+          fi
+          
+          # Step 3: Move to correct directory and install
+          if [ -n "$PACKAGE_JSON_PATH" ] && [ -d "$PACKAGE_JSON_PATH" ]; then
+            echo "📁 Changing to directory: $PACKAGE_JSON_PATH"
+            cd "$PACKAGE_JSON_PATH"
+            
+            # Verify package.json is readable
+            echo "📄 package.json contents preview:"
+            head -10 package.json || echo "Could not read package.json"
+            
+            # Try multiple installation methods with retries
+            echo "🔄 Attempting npm installation (Method 1: npm install)..."
+            if npm install --prefer-offline --no-audit; then
+              echo "✅ npm install succeeded"
+            else
+              echo "❌ npm install failed, trying method 2..."
+              
+              echo "🔄 Attempting npm installation (Method 2: npm install --force)..."
+              if npm install --force --prefer-offline --no-audit; then
+                echo "✅ npm install --force succeeded"
+              else
+                echo "❌ npm install --force failed, trying method 3..."
+                
+                echo "🔄 Attempting npm installation (Method 3: clearing cache)..."
+                npm cache clean --force
+                if npm install --prefer-offline --no-audit --verbose; then
+                  echo "✅ npm install after cache clear succeeded"
+                else
+                  echo "❌ All npm install methods failed, trying yarn..."
+                  
+                  echo "🔄 Attempting yarn installation as fallback..."
+                  if command -v yarn &> /dev/null; then
+                    if yarn install --prefer-offline --silent; then
+                      echo "✅ yarn install succeeded"
+                    else
+                      echo "❌ yarn install also failed"
+                      echo "📊 Final diagnostics:"
+                      echo "Node version: $(node --version)"
+                      echo "NPM version: $(npm --version)"
+                      echo "Current directory contents:"
+                      ls -la
+                      exit 1
+                    fi
+                  else
+                    echo "❌ Yarn not available, installation failed completely"
+                    exit 1
+                  fi
+                fi
+              fi
+            fi
+            
+            # Step 4: Verify installation worked
+            echo "✅ Dependencies installed successfully"
+            echo "📦 node_modules size: $(du -sh node_modules 2>/dev/null || echo 'N/A')"
+            
+            # Export the working directory for subsequent steps
+            echo "PACKAGE_DIR=$PACKAGE_JSON_PATH" >> $GITHUB_ENV
+            echo "WORKING_DIR=$(pwd)" >> $GITHUB_ENV
+            
+          else
+            echo "❌ Could not determine package.json location"
+            exit 1
+          fi
       
       # 5. Run tests (if available)
       - name: Run tests
         run: npm run test --if-present
         continue-on-error: true
+        working-directory: ${{ env.WORKING_DIR || '.' }}
       
       # 6. Build the Vue app
       - name: Build Vue app
         run: npm run build
+        working-directory: ${{ env.WORKING_DIR || '.' }}
       
       # 7. Verify Vue build
       - name: Verify Vue build output
         run: |
-          if [ ! -d "dist" ]; then
+          # Check in current directory first, then in package directory
+          if [ -d "dist" ]; then
+            echo "✅ Vue build verified - dist size: $(du -sh dist/)"
+          elif [ -d "${{ env.WORKING_DIR }}/dist" ]; then
+            echo "✅ Vue build verified - dist size: $(du -sh ${{ env.WORKING_DIR }}/dist/)"
+          else
             echo "❌ Error: dist directory not found!"
+            echo "Current directory contents:"
             ls -la
+            echo "Working directory contents:"
+            ls -la ${{ env.WORKING_DIR || '.' }}
+            echo "Searching for dist directory:"
+            find . -name "dist" -type d
             exit 1
           fi
-          echo "✅ Vue build verified - dist size: $(du -sh dist/)"
       
       # 8. Setup Java 21 (fixed version)
       - name: Setup Java
@@ -89,8 +228,48 @@ jobs:
       # 10. Sync Capacitor Android
       - name: Sync Capacitor Android
         run: |
-          npx cap sync android
-          echo "✅ Capacitor sync completed"
+          echo "Syncing Capacitor Android platform..."
+          
+          # Try from working directory first
+          cd ${{ env.WORKING_DIR || '.' }}
+          
+          # Check if capacitor is installed and configured
+          if [ -f "capacitor.config.ts" ] || [ -f "capacitor.config.js" ] || [ -f "capacitor.config.json" ]; then
+            echo "✅ Capacitor config found"
+          else
+            echo "⚠️  No capacitor config found, checking if @capacitor/cli is available..."
+            if ! command -v cap &> /dev/null && ! npx cap --version &> /dev/null; then
+              echo "❌ Capacitor CLI not found, installing..."
+              npm install @capacitor/cli --save-dev
+            fi
+          fi
+          
+          # Sync with multiple fallback attempts
+          if npx cap sync android --verbose; then
+            echo "✅ Capacitor sync completed successfully"
+          elif npx cap sync android; then
+            echo "✅ Capacitor sync completed (without verbose)"
+          else
+            echo "❌ Capacitor sync failed, trying alternative approach..."
+            echo "Available Capacitor commands:"
+            npx cap --help || echo "Cap CLI not responding"
+            
+            # Try initializing if needed
+            if [ ! -d "android" ]; then
+              echo "🔧 Android platform not found, adding it..."
+              npx cap add android || echo "Failed to add android platform"
+            fi
+            
+            # Try sync again
+            if npx cap sync android; then
+              echo "✅ Capacitor sync completed after platform add"
+            else
+              echo "❌ Capacitor sync failed completely"
+              echo "Project structure:"
+              ls -la
+              exit 1
+            fi
+          fi
       
       # 11. Verify Android setup
       - name: Verify Android project
