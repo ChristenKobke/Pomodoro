@@ -16,16 +16,16 @@ jobs:
         with:
           fetch-depth: 1 # Shallow clone for speed
       
-      # 2. Setup Node.js with caching
+      # 2. Setup Node.js WITHOUT caching (to avoid lock file requirement)
       - name: Setup Node.js
         uses: actions/setup-node@v4 # Updated to latest
         with:
           node-version: 20
-          cache: 'npm' # Cache npm dependencies
+          cache: '' # Explicitly disable caching
       
-      # 3. Install dependencies
+      # 3. Install dependencies with npm install (not npm ci)
       - name: Install npm dependencies
-        run: npm ci --prefer-offline --no-audit
+        run: npm install --prefer-offline --no-audit
       
       # 4. Build Vue app
       - name: Build Vue app
