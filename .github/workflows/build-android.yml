@@ -15,7 +15,6 @@ on:
         - debug
         - release
 
-
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -28,20 +27,20 @@ jobs:
         with:
           fetch-depth: 1
       
-      # 2. Setup Node.js with caching
+      # 2. Setup Node.js without caching (until you have a lock file)
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
+          # Removed cache: 'npm' to fix the lock file error
       
-      # 3. Install project dependencies (with retry)
+      # 3. Install project dependencies (with retry) - changed to npm install
       - name: Install dependencies
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: 5
           max_attempts: 3
-          command: npm ci --prefer-offline --no-audit
+          command: npm install --prefer-offline --no-audit
       
       # 4. Run tests (if available)
       - name: Run tests
