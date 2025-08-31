@@ -16,7 +16,20 @@ jobs:
         with:
           fetch-depth: 1 # Shallow clone for speed
       
-      # 2. Setup Node.js WITHOUT caching (to avoid lock file requirement)
+      # 2. Debug - Check what files are actually there
+      - name: Debug repository contents
+        run: |
+          echo "Current working directory: $(pwd)"
+          echo "Contents of repository root:"
+          ls -la
+          echo ""
+          echo "Searching for package.json anywhere:"
+          find . -name "package.json" -type f 2>/dev/null || echo "No package.json found"
+          echo ""
+          echo "Full directory tree (first 3 levels):"
+          find . -type d -maxdepth 3 | sort
+      
+      # 3. Setup Node.js WITHOUT caching (to avoid lock file requirement)
       - name: Setup Node.js
         uses: actions/setup-node@v4 # Updated to latest
         with:
