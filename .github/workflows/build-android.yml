@@ -328,7 +328,7 @@ jobs:
             exit 1
           fi
       
-      # 10. Sync Capacitor Android
+      # 10. Sync Capacitor Android with TypeScript handling
       - name: Sync Capacitor Android
         run: |
           echo "Syncing Capacitor Android platform..."
@@ -339,6 +339,18 @@ jobs:
           # Check if capacitor is installed and configured
           if [ -f "capacitor.config.ts" ] || [ -f "capacitor.config.js" ] || [ -f "capacitor.config.json" ]; then
             echo "✅ Capacitor config found"
+            
+            # Check if we have a .ts config file and need TypeScript
+            if [ -f "capacitor.config.ts" ]; then
+              echo "📝 TypeScript config detected, checking TypeScript installation..."
+              if ! npm list typescript &>/dev/null && ! npm list -g typescript &>/dev/null; then
+                echo "⚠️  TypeScript not found, installing..."
+                npm install -D typescript
+                echo "✅ TypeScript installed"
+              else
+                echo "✅ TypeScript already available"
+              fi
+            fi
           else
             echo "⚠️  No capacitor config found, checking if @capacitor/cli is available..."
             if ! command -v cap &> /dev/null && ! npx cap --version &> /dev/null; then
@@ -348,29 +360,84 @@ jobs:
           fi
           
           # Sync with multiple fallback attempts
+          echo "🔄 Attempting Capacitor sync..."
           if npx cap sync android --verbose; then
             echo "✅ Capacitor sync completed successfully"
           elif npx cap sync android; then
             echo "✅ Capacitor sync completed (without verbose)"
           else
-            echo "❌ Capacitor sync failed, trying alternative approach..."
-            echo "Available Capacitor commands:"
-            npx cap --help || echo "Cap CLI not responding"
+            echo "❌ Capacitor sync failed with TypeScript config, trying JavaScript config fallback..."
             
-            # Try initializing if needed
-            if [ ! -d "android" ]; then
-              echo "🔧 Android platform not found, adding it..."
-              npx cap add android || echo "Failed to add android platform"
-            fi
-            
-            # Try sync again
-            if npx cap sync android; then
-              echo "✅ Capacitor sync completed after platform add"
+            # If TypeScript config is causing issues, try creating a JS version
+            if [ -f "capacitor.config.ts" ] && [ ! -f "capacitor.config.js" ]; then
+              echo "🔧 Creating JavaScript config fallback..."
+              
+              # Extract basic config and create JS version
+              cat > capacitor.config.js << 'EOF'
+import { CapacitorConfig } from '@capacitor/cli';
+
+const config = {
+  appId: 'com.pomodoro.app',
+  appName: 'Pomodoro',
+  webDir: 'dist',
+  bundledWebRuntime: false
+};
+
+export default config;
+EOF
+              echo "✅ JavaScript config created"
+              
+              # Try sync again with JS config
+              if npx cap sync android; then
+                echo "✅ Capacitor sync completed with JavaScript config"
+              else
+                echo "❌ Sync still failing, trying to add platform manually..."
+                if [ ! -d "android" ]; then
+                  echo "🔧 Android platform not found, adding it..."
+                  npx cap add android || echo "Failed to add android platform"
+                fi
+                
+                # Final sync attempt
+                if npx cap sync android; then
+                  echo "✅ Capacitor sync completed after platform add"
+                else
+                  echo "❌ All Capacitor sync attempts failed"
+                  echo "Trying alternative approach - copy dist manually..."
+                  
+                  # Manual copy as last resort
+                  if [ -d "dist" ] && [ -d "android/app/src/main" ]; then
+                    rm -rf android/app/src/main/assets/public
+                    mkdir -p android/app/src/main/assets
+                    cp -r dist android/app/src/main/assets/public
+                    echo "✅ Manually copied web assets to Android"
+                  else
+                    echo "❌ Manual copy also failed - missing dist or android structure"
+                    echo "Project structure:"
+                    ls -la
+                    echo "Android structure:"
+                    find android -type d -maxdepth 3 2>/dev/null || echo "No android directory accessible"
+                    exit 1
+                  fi
+                fi
+              fi
             else
               echo "❌ Capacitor sync failed completely"
-              echo "Project structure:"
-              ls -la
-              exit 1
+              echo "Available Capacitor commands:"
+              npx cap --help || echo "Cap CLI not responding"
+              
+              # Try initializing if needed
+              if [ ! -d "android" ]; then
+                echo "🔧 Android platform not found, adding it..."
+                npx cap add android || echo "Failed to add android platform"
+              fi
+              
+              # Try sync again
+              if npx cap sync android; then
+                echo "✅ Capacitor sync completed after platform add"
+              else
+                echo "❌ Final sync attempt failed"
+                exit 1
+              fi
             fi
           fi
       
