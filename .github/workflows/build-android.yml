@@ -221,9 +221,112 @@ jobs:
           java-version: 21
           cache: 'gradle'
       
-      # 9. Make gradlew executable
+      # 9. Make gradlew executable with redundancy
       - name: Make gradlew executable
-        run: chmod +x ./android/gradlew
+        run: |
+          echo "=== GRADLE WRAPPER SETUP WITH REDUNDANCY ==="
+          
+          # Step 1: Check current directory and find gradlew
+          echo "Current directory: $(pwd)"
+          echo "Looking for gradlew files..."
+          
+          GRADLEW_PATH=""
+          
+          # Check multiple possible locations
+          if [ -f "./android/gradlew" ]; then
+            echo "✅ Found gradlew at ./android/gradlew"
+            GRADLEW_PATH="./android/gradlew"
+          elif [ -f "android/gradlew" ]; then
+            echo "✅ Found gradlew at android/gradlew"
+            GRADLEW_PATH="android/gradlew"
+          elif [ -f "${{ env.WORKING_DIR }}/android/gradlew" ]; then
+            echo "✅ Found gradlew at ${{ env.WORKING_DIR }}/android/gradlew"
+            GRADLEW_PATH="${{ env.WORKING_DIR }}/android/gradlew"
+          else
+            # Search recursively for gradlew
+            echo "🔍 Searching for gradlew recursively..."
+            FOUND_GRADLEW=$(find . -name "gradlew" -type f | head -1)
+            if [ -n "$FOUND_GRADLEW" ]; then
+              echo "✅ Found gradlew at: $FOUND_GRADLEW"
+              GRADLEW_PATH="$FOUND_GRADLEW"
+            else
+              echo "❌ gradlew not found anywhere!"
+              echo "Available directory structure:"
+              find . -type d -name "*android*" | head -5
+              echo "Contents of potential android directories:"
+              for dir in $(find . -type d -name "*android*" | head -3); do
+                echo "Contents of $dir:"
+                ls -la "$dir" 2>/dev/null || echo "  Cannot access $dir"
+              done
+              
+              # Check if android directory exists at all
+              if [ ! -d "android" ] && [ ! -d "${{ env.WORKING_DIR }}/android" ]; then
+                echo "❌ No android directory found!"
+                echo "This might mean Capacitor sync failed or android platform was never added"
+                echo "Available directories:"
+                ls -la
+                echo "Trying to add android platform..."
+                
+                cd ${{ env.WORKING_DIR || '.' }}
+                if npx cap add android; then
+                  echo "✅ Android platform added successfully"
+                  if [ -f "android/gradlew" ]; then
+                    GRADLEW_PATH="android/gradlew"
+                    echo "✅ gradlew now available at android/gradlew"
+                  else
+                    echo "❌ gradlew still not found after adding android platform"
+                    exit 1
+                  fi
+                else
+                  echo "❌ Failed to add android platform"
+                  exit 1
+                fi
+              else
+                echo "❌ Android directory exists but gradlew is missing"
+                echo "Contents of android directory:"
+                ls -la android/ 2>/dev/null || ls -la ${{ env.WORKING_DIR }}/android/ 2>/dev/null || echo "Cannot access android directory"
+                
+                # Try to regenerate gradlew
+                echo "🔧 Attempting to regenerate Gradle wrapper..."
+                cd android 2>/dev/null || cd ${{ env.WORKING_DIR }}/android 2>/dev/null || exit 1
+                
+                # Check if we have gradle
+                if command -v gradle &> /dev/null; then
+                  echo "Found gradle, generating wrapper..."
+                  gradle wrapper --gradle-version=8.0
+                  if [ -f "gradlew" ]; then
+                    echo "✅ Successfully generated gradlew"
+                    GRADLEW_PATH="./gradlew"
+                  fi
+                else
+                  echo "❌ Gradle not available to generate wrapper"
+                  exit 1
+                fi
+              fi
+            fi
+          fi
+          
+          # Step 2: Make gradlew executable if found
+          if [ -n "$GRADLEW_PATH" ] && [ -f "$GRADLEW_PATH" ]; then
+            echo "📝 Making $GRADLEW_PATH executable..."
+            chmod +x "$GRADLEW_PATH"
+            
+            # Verify it's executable
+            if [ -x "$GRADLEW_PATH" ]; then
+              echo "✅ gradlew is now executable"
+              echo "Gradle wrapper info:"
+              "$GRADLEW_PATH" --version || echo "Could not get gradle version"
+            else
+              echo "❌ Failed to make gradlew executable"
+              exit 1
+            fi
+            
+            # Export the path for later steps
+            echo "GRADLEW_PATH=$GRADLEW_PATH" >> $GITHUB_ENV
+          else
+            echo "❌ Could not locate or create gradlew"
+            exit 1
+          fi
       
       # 10. Sync Capacitor Android
       - name: Sync Capacitor Android
@@ -280,45 +383,104 @@ jobs:
           fi
           echo "✅ Android project ready"
       
-      # 12. Build Android APK
+      # 12. Build Android APK with dynamic gradlew path
       - name: Build Android APK
         run: |
+          echo "=== ANDROID APK BUILD WITH REDUNDANCY ==="
+          
           # Determine build type
           BUILD_TYPE="${{ github.event.inputs.build_type || 'debug' }}"
+          echo "🔨 Building $BUILD_TYPE APK..."
           
-          if [ "$BUILD_TYPE" = "release" ]; then
-            echo "🔨 Building RELEASE APK..."
-            ./gradlew assembleRelease --no-daemon --stacktrace
-            APK_PATH="app/build/outputs/apk/release/app-release-unsigned.apk"
+          # Determine working directory for build
+          BUILD_DIR=""
+          GRADLEW_CMD=""
+          
+          # Find the correct build directory and gradlew command
+          if [ -f "${{ env.GRADLEW_PATH }}" ]; then
+            GRADLEW_CMD="${{ env.GRADLEW_PATH }}"
+            # Extract directory from gradlew path
+            BUILD_DIR=$(dirname "${{ env.GRADLEW_PATH }}")
+            echo "Using gradlew: $GRADLEW_CMD"
+            echo "Build directory: $BUILD_DIR"
           else
-            echo "🔨 Building DEBUG APK..."
-            ./gradlew assembleDebug --no-daemon --stacktrace
-            APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
+            echo "❌ GRADLEW_PATH environment variable not set or file not found"
+            exit 1
           fi
           
-          # Verify APK was created
-          if [ ! -f "$APK_PATH" ]; then
+          # Change to build directory
+          if [ "$BUILD_DIR" != "." ] && [ -d "$BUILD_DIR" ]; then
+            cd "$BUILD_DIR"
+            GRADLEW_CMD="./gradlew"
+          fi
+          
+          # Verify we're in the right place
+          echo "Current directory for build: $(pwd)"
+          echo "Contents:"
+          ls -la
+          
+          # Build based on type
+          if [ "$BUILD_TYPE" = "release" ]; then
+            echo "🔨 Building RELEASE APK..."
+            if $GRADLEW_CMD assembleRelease --no-daemon --stacktrace; then
+              APK_PATH="app/build/outputs/apk/release/app-release-unsigned.apk"
+            else
+              echo "❌ Release build failed, trying with different flags..."
+              $GRADLEW_CMD assembleRelease --no-daemon --info || exit 1
+              APK_PATH="app/build/outputs/apk/release/app-release-unsigned.apk"
+            fi
+          else
+            echo "🔨 Building DEBUG APK..."
+            if $GRADLEW_CMD assembleDebug --no-daemon --stacktrace; then
+              APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
+            else
+              echo "❌ Debug build failed, trying with different flags..."
+              $GRADLEW_CMD assembleDebug --no-daemon --info || exit 1
+              APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
+            fi
+          fi
+          
+          # Verify APK was created with multiple fallback searches
+          if [ -f "$APK_PATH" ]; then
+            echo "✅ APK built successfully: $APK_PATH"
+          else
             echo "❌ APK not found at expected path: $APK_PATH"
-            echo "Searching for any APK files..."
-            find app/build/outputs -name "*.apk" -type f || echo "No APK files found"
-            exit 1
+            echo "🔍 Searching for any APK files..."
+            
+            # Search in multiple locations
+            FOUND_APKS=$(find . -name "*.apk" -type f 2>/dev/null)
+            if [ -n "$FOUND_APKS" ]; then
+              echo "Found APK files:"
+              echo "$FOUND_APKS"
+              # Use the first APK found
+              APK_PATH=$(echo "$FOUND_APKS" | head -1)
+              echo "Using APK: $APK_PATH"
+            else
+              echo "No APK files found anywhere!"
+              echo "Build output structure:"
+              find . -name "outputs" -type d -exec ls -la {} \; 2>/dev/null || echo "No outputs directory found"
+              exit 1
+            fi
           fi
           
           echo "✅ APK built successfully: $APK_PATH"
           echo "APK size: $(du -h "$APK_PATH" | cut -f1)"
           
-          # Export for next step
+          # Convert relative path to absolute for artifact upload
+          FULL_APK_PATH="$(pwd)/$APK_PATH"
+          
+          # Export for next steps
           echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
+          echo "FULL_APK_PATH=$FULL_APK_PATH" >> $GITHUB_ENV
           echo "BUILD_TYPE=$BUILD_TYPE" >> $GITHUB_ENV
-        working-directory: android
       
-      # 13. Upload APK artifact
+      # 13. Upload APK artifact with dynamic path
       - name: Upload APK
         uses: actions/upload-artifact@v4
         if: success()
         with:
           name: pomodoro-app-${{ env.BUILD_TYPE }}-${{ github.run_number }}
-          path: android/${{ env.APK_PATH }}
+          path: ${{ env.FULL_APK_PATH }}
           retention-days: 30
       
       # 14. Create build summary
@@ -353,12 +515,12 @@ jobs:
               *Built from: ${{ github.sha }}*`
             });
       
-      # 16. Create GitHub release (for version tags)
+      # 16. Create GitHub release (for version tags) with dynamic path
       - name: Create Release
         if: success() && startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: android/${{ env.APK_PATH }}
+          files: ${{ env.FULL_APK_PATH }}
           name: Release ${{ github.ref_name }}
           body: |
             ## 📱 Pomodoro App ${{ github.ref_name }}
