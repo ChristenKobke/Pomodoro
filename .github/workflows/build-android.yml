@@ -1,1 +1,58 @@
 
+name: Build Android APK (Automatic)
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: # allows manual trigger
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout code
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      # 2. Setup Node.js
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 20
+
+      # 3. Install dependencies
+      - name: Install npm dependencies
+        run: npm ci
+
+      # 4. Build Vue app
+      - name: Build Vue app
+        run: npm run build
+
+      # 5. Setup Java for Android
+      - name: Setup Java
+        uses: actions/setup-java@v3
+        with:
+          distribution: temurin
+          java-version: 17
+
+      # 6. Install Gradle wrapper (already in project)
+      - name: Ensure Gradle wrapper is executable
+        run: chmod +x ./android/gradlew
+
+      # 7. Sync Capacitor Android
+      - name: Sync Capacitor Android
+        run: npx cap sync android
+
+      # 8. Build Debug APK
+      - name: Build Android Debug APK
+        run: ./gradlew assembleDebug
+        working-directory: android
+
+      # 9. Upload APK artifact
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: pomodoro-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+
