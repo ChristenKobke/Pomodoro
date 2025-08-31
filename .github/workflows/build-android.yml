@@ -14,7 +14,6 @@ on:
         options:
         - debug
         - release
-        
 
 jobs:
   build:
@@ -28,7 +27,16 @@ jobs:
         with:
           fetch-depth: 1
       
-      # 2. Setup Node.js without caching (until you have a lock file)
+      # 2. Debug - Check repository contents
+      - name: Debug repository contents
+        run: |
+          echo "Current directory: $(pwd)"
+          echo "Repository contents:"
+          ls -la
+          echo "Looking for package.json:"
+          find . -name "package.json" -type f || echo "No package.json found"
+      
+      # 3. Setup Node.js without caching (until you have a lock file)
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
