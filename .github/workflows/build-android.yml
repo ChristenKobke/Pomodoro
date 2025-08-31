@@ -31,10 +31,14 @@ jobs:
       - name: Debug repository contents
         run: |
           echo "Current directory: $(pwd)"
-          echo "Repository contents:"
+          echo "Repository root contents:"
           ls -la
-          echo "Looking for package.json:"
-          find . -name "package.json" -type f || echo "No package.json found"
+          echo ""
+          echo "Looking for package.json recursively:"
+          find . -name "package.json" -type f 2>/dev/null || echo "No package.json found"
+          echo ""
+          echo "Directory structure:"
+          find . -type d -maxdepth 3 | head -20
       
       # 3. Setup Node.js without caching (until you have a lock file)
       - name: Setup Node.js
@@ -43,13 +47,20 @@ jobs:
           node-version: 20
           # Removed cache: 'npm' to fix the lock file error
       
-      # 3. Install project dependencies (with retry) - changed to npm install
+      # 3. Install project dependencies - simplified without retry for now
       - name: Install dependencies
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 5
-          max_attempts: 3
-          command: npm install --prefer-offline --no-audit
+        run: |
+          echo "Checking if package.json exists:"
+          if [ ! -f "package.json" ]; then
+            echo "❌ package.json not found in $(pwd)"
+            echo "Contents of current directory:"
+            ls -la
+            echo "Searching entire workspace:"
+            find /home/runner/work -name "package.json" 2>/dev/null || echo "No package.json found anywhere"
+            exit 1
+          fi
+          echo "✅ package.json found, installing dependencies..."
+          npm install --prefer-offline --no-audit
       
       # 4. Run tests (if available)
       - name: Run tests
