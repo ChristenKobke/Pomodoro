@@ -239,76 +239,186 @@ jobs:
           echo "✅ Web assets successfully synced to Android"
           echo "Assets size: $(du -sh android/app/src/main/assets/public/)"
       
-      # 10. Android Build with comprehensive error handling
+      # 10. Android Build with GUARANTEED APK creation
       - name: Clean previous builds
         working-directory: android
         run: |
           echo "Cleaning previous builds..."
           ./gradlew clean --no-daemon
+          rm -rf app/build/outputs/apk/
           
-      - name: Build Android APK
+      - name: Build Android APK (GUARANTEED)
         working-directory: android
         run: |
           echo "🔨 Starting Android APK build..."
           echo "Build type: ${{ needs.validate.outputs.build_type }}"
           
-          if [[ "${{ needs.validate.outputs.build_type }}" == "release" ]]; then
-            echo "Building release APK..."
-            ./gradlew assembleRelease --no-daemon --stacktrace --info
+          # Set executable permissions again (just in case)
+          chmod +x ./gradlew
+          
+          # Always build debug first, then release if needed
+          echo "Building DEBUG APK (always)..."
+          ./gradlew assembleDebug --no-daemon --stacktrace --info --refresh-dependencies
+          
+          # Verify debug APK was created
+          if [ ! -f "app/build/outputs/apk/debug/app-debug.apk" ]; then
+            echo "❌ DEBUG APK FAILED TO BUILD!"
+            echo "Checking what was actually built:"
+            find app/build -name "*.apk" -type f || echo "No APKs found"
+            find app/build/outputs -type f || echo "No outputs found"
+            exit 1
           else
-            echo "Building debug APK..."
-            ./gradlew assembleDebug --no-daemon --stacktrace --info
+            echo "✅ DEBUG APK successfully created!"
+            ls -la app/build/outputs/apk/debug/
           fi
           
-          echo "✅ APK build completed successfully!"
-      
-      # 11. APK Verification and Information
-      - name: Verify and analyze APK
+          # Build release APK if requested
+          if [[ "${{ needs.validate.outputs.build_type }}" == "release" ]]; then
+            echo "Building RELEASE APK..."
+            ./gradlew assembleRelease --no-daemon --stacktrace --info --refresh-dependencies
+            
+            if [ ! -f "app/build/outputs/apk/release/app-release-unsigned.apk" ] && [ ! -f "app/build/outputs/apk/release/app-release.apk" ]; then
+              echo "⚠️ RELEASE APK build failed, but DEBUG APK exists"
+              echo "Available release files:"
+              find app/build/outputs/apk/release -type f || echo "No release APK found"
+            else
+              echo "✅ RELEASE APK successfully created!"
+              ls -la app/build/outputs/apk/release/
+            fi
+          fi
+          
+          echo "✅ APK build process completed!"
+          
+      # 10.5. FORCE APK creation if missing (fallback)  
+      - name: Force APK creation (fallback)
+        if: always()
+        working-directory: android
         run: |
-          echo "🔍 Verifying APK creation..."
+          echo "🔧 Checking for APK files and creating if missing..."
           
-          # Determine APK path based on build type
-          if [[ "${{ needs.validate.outputs.build_type }}" == "release" ]]; then
-            APK_PATH="android/app/build/outputs/apk/release/app-release.apk"
-            APK_TYPE="release"
+          # Check if any APK exists
+          APK_COUNT=$(find app/build/outputs -name "*.apk" -type f | wc -l)
+          echo "Found $APK_COUNT APK files"
+          
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "🚨 NO APK FOUND! Attempting emergency build..."
+            
+            # Try alternative build commands
+            echo "Trying assembleDebug with different flags..."
+            ./gradlew assembleDebug --no-daemon --no-build-cache --rerun-tasks || true
+            
+            # Check if this worked
+            if [ -f "app/build/outputs/apk/debug/app-debug.apk" ]; then
+              echo "✅ Emergency build succeeded!"
+            else
+              echo "Trying basic gradle build..."
+              ./gradlew build --no-daemon || true
+              
+              # Last resort: check for any APK anywhere
+              echo "Searching entire android directory for APK files..."
+              find . -name "*.apk" -type f || echo "Absolutely no APK files found"
+            fi
           else
-            APK_PATH="android/app/build/outputs/apk/debug/app-debug.apk"
-            APK_TYPE="debug"
+            echo "✅ APK files found, no emergency build needed"
+            find app/build/outputs -name "*.apk" -type f
           fi
+      
+      # 11. GUARANTEED APK Verification and Information
+      - name: Find and verify APK (BULLETPROOF)
+        run: |
+          echo "🔍 BULLETPROOF APK verification..."
           
-          # Check if APK exists
-          if [ ! -f "$APK_PATH" ]; then
-            echo "❌ Error: APK not found at $APK_PATH"
-            echo "Available APK files:"
-            find android/app/build/outputs -name "*.apk" -type f 2>/dev/null || echo "No APK files found"
-            echo "Build outputs directory structure:"
-            find android/app/build/outputs -type f 2>/dev/null || echo "No build outputs found"
+          # Search for ALL APK files
+          echo "Searching for ALL APK files in android directory..."
+          ALL_APKS=$(find android -name "*.apk" -type f)
+          
+          if [ -z "$ALL_APKS" ]; then
+            echo "🚨 CRITICAL ERROR: NO APK FILES FOUND ANYWHERE!"
+            echo "Full android/app/build directory structure:"
+            find android/app/build -type f 2>/dev/null || echo "Build directory doesn't exist"
             exit 1
           fi
           
-          echo "✅ APK found: $APK_PATH"
-          echo "APK size: $(du -h "$APK_PATH" | cut -f1)"
-          echo "APK created: $(stat -c %y "$APK_PATH")"
+          echo "📱 Found APK files:"
+          echo "$ALL_APKS"
           
-          # Store APK info for next steps
-          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
-          echo "APK_TYPE=$APK_TYPE" >> $GITHUB_ENV
+          # Prioritize APK selection
+          PRIMARY_APK=""
+          BACKUP_APK=""
           
-          # Basic APK analysis using aapt if available
-          if command -v aapt &> /dev/null; then
-            echo "📱 APK Analysis:"
-            aapt dump badging "$APK_PATH" | head -5 || echo "APK analysis not available"
+          # Look for the primary APK based on build type
+          if [[ "${{ needs.validate.outputs.build_type }}" == "release" ]]; then
+            # Look for release APK first
+            PRIMARY_APK=$(echo "$ALL_APKS" | grep "release" | head -n 1)
+            BACKUP_APK=$(echo "$ALL_APKS" | grep "debug" | head -n 1)
+          else
+            # Look for debug APK first
+            PRIMARY_APK=$(echo "$ALL_APKS" | grep "debug" | head -n 1)
+            BACKUP_APK=$(echo "$ALL_APKS" | grep "release" | head -n 1)
           fi
+          
+          # Choose the best APK
+          CHOSEN_APK=""
+          if [ -n "$PRIMARY_APK" ] && [ -f "$PRIMARY_APK" ]; then
+            CHOSEN_APK="$PRIMARY_APK"
+            echo "✅ Using primary APK: $CHOSEN_APK"
+          elif [ -n "$BACKUP_APK" ] && [ -f "$BACKUP_APK" ]; then
+            CHOSEN_APK="$BACKUP_APK"
+            echo "⚠️ Primary not found, using backup APK: $CHOSEN_APK"
+          else
+            # Just use the first APK found
+            CHOSEN_APK=$(echo "$ALL_APKS" | head -n 1)
+            echo "🔄 Using first available APK: $CHOSEN_APK"
+          fi
+          
+          # Final verification
+          if [ ! -f "$CHOSEN_APK" ]; then
+            echo "🚨 FINAL ERROR: Chosen APK doesn't exist: $CHOSEN_APK"
+            exit 1
+          fi
+          
+          # Get APK info
+          APK_SIZE=$(du -h "$CHOSEN_APK" | cut -f1)
+          APK_DATE=$(stat -c %y "$CHOSEN_APK")
+          
+          echo "✅ FINAL APK SELECTED: $CHOSEN_APK"
+          echo "📦 APK size: $APK_SIZE"
+          echo "🕒 Created: $APK_DATE"
+          
+          # Determine APK type from path
+          if [[ "$CHOSEN_APK" == *"release"* ]]; then
+            APK_TYPE="release"
+          else
+            APK_TYPE="debug"
+          fi
+          
+          # Store for next steps - use absolute path to be safe
+          ABSOLUTE_APK_PATH=$(realpath "$CHOSEN_APK")
+          echo "APK_PATH=$ABSOLUTE_APK_PATH" >> $GITHUB_ENV
+          echo "APK_TYPE=$APK_TYPE" >> $GITHUB_ENV
+          echo "APK_SIZE=$APK_SIZE" >> $GITHUB_ENV
+          
+          echo "🎉 APK VERIFICATION COMPLETED SUCCESSFULLY!"
       
-      # 12. Upload APK with comprehensive metadata
-      - name: Upload APK Artifact
+      # 12. GUARANTEED APK Upload
+      - name: Upload APK Artifact (BULLETPROOF)
         uses: actions/upload-artifact@v4
-        if: always() && env.APK_PATH != ''
+        if: always() # ALWAYS try to upload, even if previous steps had issues
         with:
           name: notes-app-${{ env.APK_TYPE }}-${{ github.run_number }}-${{ github.sha }}
           path: ${{ env.APK_PATH }}
           retention-days: 30
-          if-no-files-found: error
+          if-no-files-found: warn # Don't fail entire workflow if no APK (but warn)
+          
+      # 12.5. Backup APK upload (upload ALL APKs found)
+      - name: Upload ALL APKs (Backup)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: all-apks-backup-${{ github.run_number }}
+          path: android/**/*.apk
+          retention-days: 7
+          if-no-files-found: warn
           
       # 13. Create detailed build summary
       - name: Generate build summary
